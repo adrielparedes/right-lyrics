@@ -1,7 +1,8 @@
 const express = require("express");
 const mongoose = require('mongoose');
-const cors = require('cors')
-
+const cors = require('cors');
+const { Tags, FORMAT_HTTP_HEADERS } = require('opentracing');
+const tracer = require('./tracing').initTracer("Lyrics Service") ;
 
 const DB = process.env.DB_NAME ||"rl"
 const HOST_DB = process.env.DB_HOST || "localhost:27017"
@@ -42,10 +43,36 @@ var Lyric = new Schema({
 var Lyric = mongoose.model('Lyric', Lyric);
 
 app.get('/api/lyric/:lyricId', (req, res) => {
+
+    const parentSpanContext = tracer.extract(FORMAT_HTTP_HEADERS, req.headers)
+    const span = tracer.startSpan("Get Lyric",{
+                                    childOf: parentSpanContext ,
+                                    tags: {["lyric"]: req.params.lyricId, 
+                                           [Tags.SPAN_KIND]: Tags.SPAN_KIND_RPC_CLIENT}});
+
+
+
+    const db_span = tracer.startSpan("Find One",{
+                                         childOf: span.context() ,
+                                         tags: {["lyric"]: req.params.lyricId, 
+                                                [Tags.DB_TYPE]: "NoSql MongoDB",
+                                                [Tags.DB_INSTANCE]: HOST_DB,
+                                                [Tags.DB_STATEMENT]: "db.findOne()",
+                                                ["db.name"]: DB}
+                                                });
+
+
     Lyric.findOne({ '_id': req.params.lyricId }, 'name lyric', function (err, lyric) {
         console.log(err)
-        if (err) return handleError(err);
         
+        if (err) {
+            db_span.finish();
+            span.finish();
+            return handleError(err);
+        }
+        
+        db_span.finish();
+        span.finish();
         console.log(lyric)
         return res.send(lyric);
     })    

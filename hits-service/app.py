@@ -43,11 +43,12 @@ def get(id):
     try :
         span_ctx = tracer.extract(Format.HTTP_HEADERS, request.headers)
         span_tags = {tags.SPAN_KIND: tags.SPAN_KIND_RPC_SERVER, "id_song": id}
-        with tracer.start_active_span('hits', child_of=span_ctx, tags=span_tags):
-            hits = r.get(id) if r.get(id) is not None else 0
-            total = r.get("total") if r.get("total") is not None else 0
+        with tracer.start_span('hits', child_of=span_ctx, tags=span_tags) as span:
+                with tracer.start_span('redis', child_of=span) as redis_span:
+                    hits = r.get(id) if r.get(id) is not None else 0
+                    total = r.get("total") if r.get("total") is not None else 0
 
-            return {"status": "0", "hits": str(hits), "total": str(total)}
+        return {"status": "0", "hits": str(hits), "total": str(total)}
     except redis.ConnectionError as e:
         return {"status": "-1", "message": str(e)}
     except:
@@ -59,11 +60,12 @@ def get_popularity(id):
     try: 
         span_ctx = tracer.extract(Format.HTTP_HEADERS, request.headers)
         span_tags = {tags.SPAN_KIND: tags.SPAN_KIND_RPC_SERVER, "id_song": id}
-        with tracer.start_active_span('popularity', child_of=span_ctx, tags=span_tags):
-            print(id)
-            hits = int(r.get(id)) if r.get(id) is not None else 0
-            total = int(r.get("total")) if r.get("total") is not None else 0
-
+        with tracer.start_span('popularity', child_of=span_ctx, tags=span_tags) as span:
+            with tracer.start_span('redis', child_of=span) as redis_span:
+                print(id)
+                hits = int(r.get(id)) if r.get(id) is not None else 0
+                total = int(r.get("total")) if r.get("total") is not None else 0
+                
         if (total is not 0):
             ratio = hits * 5 // total
         else:
@@ -82,18 +84,18 @@ def hit():
     try:
         span_ctx = tracer.extract(Format.HTTP_HEADERS, request.headers)
         span_tags = {tags.SPAN_KIND: tags.SPAN_KIND_RPC_SERVER}
-        with tracer.start_active_span('hits', child_of=span_ctx, tags=span_tags):
+        with tracer.start_span('hits', child_of=span_ctx, tags=span_tags) as span:
             data = request.json
             id = int(data["id"])
+            with tracer.start_span('redis', child_of=span) as redis_span:
+                r.setnx(id, 0)  
+                r.incr(id, 1)
 
-            r.setnx(id, 0)
-            r.incr(id, 1)
+                r.setnx("total", 0)
+                r.incr("total", 1)
 
-            r.setnx("total", 0)
-            r.incr("total", 1)
-
-            hits = int(r.get(id))
-            total = int(r.get("total"))
+                hits = int(r.get(id))
+                total = int(r.get("total"))
 
             ratio = hits * 5 / total
 

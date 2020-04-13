@@ -88,21 +88,22 @@ public class SongController {
         Set<Song> songs;
         try (Scope scope = tracer.scopeManager().activate(span)) {
 
-            Span songsByNameSpan = tracer.buildSpan("Songs By Name").asChildOf(span).start();
+            Span songsByNameSpan = tracer.buildSpan("Postgresql").asChildOf(span).start();
             List<Song> songsByName = repository.findByNameIgnoreCaseContaining(searchText.getText());
             songsByNameSpan.finish();
 
-            Span songsByArtistSpan = tracer.buildSpan("Songs By Artist").asChildOf(span).start();
+            Span songsByArtistSpan = tracer.buildSpan("Postgresql").asChildOf(span).start();
             List<Song> songsByArtist = repository.findByArtistIgnoreCaseContaining(searchText.getText());
             songsByArtistSpan.finish();
 
             songs = Stream.concat(songsByName.stream(), songsByArtist.stream()).collect(Collectors.toSet());
-        } finally {
-            span.finish();
-        }
+
 
 
         return this.createSuccessResponse(this.mapSongsToSongResponseList(songs.stream().collect(Collectors.toList())));
+        } finally {
+            span.finish();
+        }
     }
 
     private List<SongResponse> mapSongsToSongResponseList(List<Song> songs) {

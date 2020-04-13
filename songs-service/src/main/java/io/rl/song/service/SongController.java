@@ -1,16 +1,25 @@
 package io.rl.song.service;
 
+
+import io.opentracing.Scope;
+import io.opentracing.Span;
+import io.opentracing.SpanContext;
+import io.opentracing.Tracer;
+import io.opentracing.propagation.Format;
+import io.opentracing.propagation.TextMapAdapter;
+import io.opentracing.tag.Tags;
 import io.rl.song.api.*;
 import io.rl.song.model.Song;
 
+import io.rl.song.opentracing.HttpHeadersCarrier;
+import io.rl.song.opentracing.RestTemplateOpentracingInterceptor;
 import io.rl.song.repository.SongRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.http.HttpEntity;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.HttpMethod;
-import org.springframework.http.MediaType;
+import org.springframework.http.*;
+import org.springframework.http.client.ClientHttpRequestInterceptor;
+import org.springframework.util.CollectionUtils;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.client.RestTemplate;
 
@@ -18,50 +27,80 @@ import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+
 @RestController
 @RequestMapping(value = "/api/song")
 public class SongController {
 
+    @Autowired
+    private final Tracer tracer;
+
     private final SongRepository repository;
 
-    private static final String  HIT_SERVICE = System.getenv("HITS_SERVICE_URL") != null ?  System.getenv("HITS_SERVICE_URL") : "http://localhost:8080";
-
-
-
+    private static final String HIT_SERVICE = System.getenv("HITS_SERVICE_URL") != null ? System.getenv("HITS_SERVICE_URL") : "http://localhost:8080";
 
     Logger logger = LoggerFactory.getLogger(SongController.class);
 
-    public SongController(SongRepository repository) {
+    public SongController(Tracer tracer, SongRepository repository) {
+        this.tracer = tracer;
         this.repository = repository;
+        this.restTemplate = this.opentracingRestTemplate(tracer);
     }
 
-    @Autowired
-    RestTemplate restTemplate;
+    private final RestTemplate restTemplate;
 
     @GetMapping("/{id}")
-    public Response get(@PathVariable("id") Long id) {
-        Optional<Song> song = repository.findById(id);
-        if (song.isPresent()) {
-            this.hitSong(song.get());
+    public Response get(@PathVariable("id") Long id, @RequestHeader Map<String, String> httpHeaders) {
+        Span span = this.initialSpan(tracer, httpHeaders, "Get By ID");
 
-            return this.createSuccessResponse(this.mapSongToSongResponse(song.get()));
-        } else
-            return this.createErrorResponse("Error");
+        try (Scope scope = tracer.scopeManager().activate(span)) {
+
+            Span findByIdSpan = tracer.buildSpan("findById").asChildOf(span).start();
+            Optional<Song> song = repository.findById(id);
+            findByIdSpan.finish();
+
+            if (song.isPresent()) {
+                this.hitSong(song.get());
+
+                return this.createSuccessResponse(this.mapSongToSongResponse(song.get()));
+            } else
+                return this.createErrorResponse("Error");
+        } finally {
+            span.finish();
+        }
     }
 
     @GetMapping
-    public Response getAll() {
-        List<Song> songs = repository.findAll();
-
+    public Response getAll(@RequestHeader Map<String, String> httpHeaders) {
+        Span span = this.initialSpan(tracer, httpHeaders, "Get All");
+        List<Song> songs;
+        try (Scope scope = tracer.scopeManager().activate(span)) {
+            songs = repository.findAll();
+        } finally {
+            span.finish();
+        }
         return this.createSuccessResponse(this.mapSongsToSongResponseList(songs));
     }
 
-    @PostMapping(path= "/search", consumes = "application/json", produces = "application/json")
-    public Response search(@RequestBody SearchTextRequest searchText) {
-        List<Song> songsByName = repository.findByNameIgnoreCaseContaining(searchText.getText());
-        List<Song> songsByArtist = repository.findByArtistIgnoreCaseContaining(searchText.getText());
+    @PostMapping(path = "/search", consumes = "application/json", produces = "application/json")
+    public Response search(@RequestBody SearchTextRequest searchText, @RequestHeader Map<String, String> httpHeaders) {
+        Span span = this.initialSpan(tracer, httpHeaders, "Search");
+        Set<Song> songs;
+        try (Scope scope = tracer.scopeManager().activate(span)) {
 
-        Set<Song> songs = Stream.concat(songsByName.stream(), songsByArtist.stream()).collect(Collectors.toSet());
+            Span songsByNameSpan = tracer.buildSpan("Songs By Name").asChildOf(span).start();
+            List<Song> songsByName = repository.findByNameIgnoreCaseContaining(searchText.getText());
+            songsByNameSpan.finish();
+
+            Span songsByArtistSpan = tracer.buildSpan("Songs By Artist").asChildOf(span).start();
+            List<Song> songsByArtist = repository.findByArtistIgnoreCaseContaining(searchText.getText());
+            songsByArtistSpan.finish();
+
+            songs = Stream.concat(songsByName.stream(), songsByArtist.stream()).collect(Collectors.toSet());
+        } finally {
+            span.finish();
+        }
+
 
         return this.createSuccessResponse(this.mapSongsToSongResponseList(songs.stream().collect(Collectors.toList())));
     }
@@ -69,7 +108,7 @@ public class SongController {
     private List<SongResponse> mapSongsToSongResponseList(List<Song> songs) {
         List<SongResponse> songResponses = new ArrayList<SongResponse>();
 
-        for (Song song: songs) {
+        for (Song song : songs) {
             songResponses.add(this.mapSongToSongResponse(song));
         }
 
@@ -98,7 +137,7 @@ public class SongController {
 
         HttpHeaders headers = new HttpHeaders();
         headers.setAccept(Arrays.asList(MediaType.APPLICATION_JSON));
-        HttpEntity<HitRequest> entity = new HttpEntity<HitRequest>(hit,headers);
+        HttpEntity<HitRequest> entity = new HttpEntity<HitRequest>(hit, headers);
 
         try {
 
@@ -107,8 +146,8 @@ public class SongController {
                     entity,
                     HitResponse.class).getBody();
 
-            popularity =  hitResponse.getPopularity();
-        } catch(Exception e) {
+            popularity = hitResponse.getPopularity();
+        } catch (Exception e) {
             logger.error(e.getMessage());
         }
 
@@ -116,24 +155,18 @@ public class SongController {
     }
 
     private String getSongPopularity(Song song) {
+
+
         String popularity = null;
 
         HitResponse hitResponse;
 
         HttpHeaders headers = new HttpHeaders();
         headers.setAccept(Arrays.asList(MediaType.APPLICATION_JSON));
-
-        try {
             hitResponse = restTemplate.getForEntity(
-                    String.format("%s/api/popularity/%d",HIT_SERVICE, song.getId()),
+                    String.format("%s/api/popularity/%d", HIT_SERVICE, song.getId()),
                     HitResponse.class).getBody();
-
-            popularity =  hitResponse.getPopularity();
-        } catch(Exception e) {
-            logger.error(e.getMessage());
-        }
-
-        return popularity;
+             return hitResponse.getPopularity();
     }
 
     private Response createErrorResponse(String message) {
@@ -152,6 +185,27 @@ public class SongController {
         response.setData(data);
 
         return response;
+    }
+
+
+    private RestTemplate opentracingRestTemplate(Tracer tracer) {
+
+        RestTemplate restTemplate = new RestTemplate();
+
+        List<ClientHttpRequestInterceptor> interceptors
+                = restTemplate.getInterceptors();
+        if (CollectionUtils.isEmpty(interceptors)) {
+            interceptors = new ArrayList<>();
+        }
+        interceptors.add(new RestTemplateOpentracingInterceptor(tracer));
+        restTemplate.setInterceptors(interceptors);
+        return restTemplate;
+    }
+
+    private Span initialSpan(Tracer tracer, Map<String, String> httpHeaders, String operationName){
+        SpanContext parentSpanCtx = tracer.extract(Format.Builtin.HTTP_HEADERS, new TextMapAdapter(httpHeaders));
+        Tracer.SpanBuilder spanBuilder = parentSpanCtx == null ? tracer.buildSpan(operationName) : tracer.buildSpan(operationName).asChildOf(parentSpanCtx);
+        return spanBuilder.withTag(Tags.SPAN_KIND.getKey(), Tags.SPAN_KIND_SERVER).start();
     }
 }
 
